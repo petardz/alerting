@@ -129,8 +129,8 @@ class TransportGetAlertsAction @Inject constructor(
         client.threadPool().threadContext.stashContext().use {
             scope.launch {
                 try {
-                    val alertIndex = resolveAlertsIndexName(getAlertsRequest)
-                    getAlerts(alertIndex, searchSourceBuilder, actionListener, user)
+                    val alertIndicies = resolveAlertsIndexName(getAlertsRequest)
+                    getAlerts(alertIndicies, searchSourceBuilder, actionListener, user)
                 } catch (t: Exception) {
                     log.error("Failed to get alerts", t)
                     if (t is AlertingException) {
@@ -148,10 +148,14 @@ class TransportGetAlertsAction @Inject constructor(
      2. alert index mentioned in monitor data sources.
      3. Default alert indices pattern
      */
-    suspend fun resolveAlertsIndexName(getAlertsRequest: GetAlertsRequest): String {
-        var alertIndex = AlertIndices.ALL_ALERT_INDEX_PATTERN
+    suspend fun resolveAlertsIndexName(getAlertsRequest: GetAlertsRequest): List<String> {
+        var alertIndices = mutableListOf(AlertIndices.ALL_ALERT_INDEX_PATTERN)
         if (getAlertsRequest.alertIndex.isNullOrEmpty() == false) {
-            alertIndex = getAlertsRequest.alertIndex!!
+            alertIndices.clear()
+            alertIndices.add(getAlertsRequest.alertIndex!!)
+        } else if (getAlertsRequest.alertIndices.isNullOrEmpty() == false) {
+            alertIndices.clear()
+            alertIndices.addAll(getAlertsRequest.alertIndices!!)
         } else if (getAlertsRequest.monitorId.isNullOrEmpty() == false)
             withContext(Dispatchers.IO) {
                 val getMonitorRequest = GetMonitorRequest(
@@ -165,14 +169,18 @@ class TransportGetAlertsAction @Inject constructor(
                         execute(GetMonitorAction.INSTANCE, getMonitorRequest, it)
                     }
                 if (getMonitorResponse.monitor != null) {
-                    alertIndex = getMonitorResponse.monitor!!.dataSources.alertsIndex
+                    alertIndices.clear()
+                    alertIndices.add(getMonitorResponse.monitor!!.dataSources.alertsIndex)
+                    if (getMonitorResponse.monitor!!.dataSources.alertsHistoryIndex != null) {
+                        alertIndices.add(getMonitorResponse.monitor!!.dataSources.alertsHistoryIndex!!)
+                    }
                 }
             }
-        return alertIndex
+        return alertIndices
     }
 
     fun getAlerts(
-        alertIndex: String,
+        alertIndices: List<String>,
         searchSourceBuilder: SearchSourceBuilder,
         actionListener: ActionListener<GetAlertsResponse>,
         user: User?
@@ -180,25 +188,25 @@ class TransportGetAlertsAction @Inject constructor(
         // user is null when: 1/ security is disabled. 2/when user is super-admin.
         if (user == null) {
             // user is null when: 1/ security is disabled. 2/when user is super-admin.
-            search(alertIndex, searchSourceBuilder, actionListener)
+            search(alertIndices, searchSourceBuilder, actionListener)
         } else if (!doFilterForUser(user)) {
             // security is enabled and filterby is disabled.
-            search(alertIndex, searchSourceBuilder, actionListener)
+            search(alertIndices, searchSourceBuilder, actionListener)
         } else {
             // security is enabled and filterby is enabled.
             try {
                 log.info("Filtering result by: ${user.backendRoles}")
                 addFilter(user, searchSourceBuilder, "monitor_user.backend_roles.keyword")
-                search(alertIndex, searchSourceBuilder, actionListener)
+                search(alertIndices, searchSourceBuilder, actionListener)
             } catch (ex: IOException) {
                 actionListener.onFailure(AlertingException.wrap(ex))
             }
         }
     }
 
-    fun search(alertIndex: String, searchSourceBuilder: SearchSourceBuilder, actionListener: ActionListener<GetAlertsResponse>) {
+    fun search(alertIndices: List<String>, searchSourceBuilder: SearchSourceBuilder, actionListener: ActionListener<GetAlertsResponse>) {
         val searchRequest = SearchRequest()
-            .indices(alertIndex)
+            .indices(*alertIndices.toTypedArray())
             .source(searchSourceBuilder)
 
         client.search(
